@@ -53,6 +53,8 @@ public final class NonBlockingStatsDClient implements StatsDClient {
 
     private static final int PACKET_SIZE_BYTES = 1400;
 
+    private static final int BATCH_HOLD_BACK_TIME_MS = 500;
+
     private static final StatsDClientErrorHandler NO_OP_HANDLER = new StatsDClientErrorHandler() {
         @Override public void handle(final Exception e) { /* No-op */ }
     };
@@ -852,6 +854,8 @@ public final class NonBlockingStatsDClient implements StatsDClient {
 
         private final Callable<InetSocketAddress> addressLookup;
 
+        private volatile long lastSendTimeNanos = 0;
+
         QueueConsumer(final Callable<InetSocketAddress> addressLookup) {
             this.addressLookup = addressLookup;
         }
@@ -870,6 +874,15 @@ public final class NonBlockingStatsDClient implements StatsDClient {
                             sendBuffer.put( (byte) '\n');
                         }
                         sendBuffer.put(data);
+
+                        // This queue consumer is fast. In fact, so fast that it doesn't batch
+                        // well from slow producers. To improve batching, if we drain the queue
+                        // but have recently flushed, let's hold back and optimistically wait for
+                        // more messages.
+                        if(null == queue.peek() && timeSinceLastSendMs() < BATCH_HOLD_BACK_TIME_MS) {
+                            Thread.sleep(BATCH_HOLD_BACK_TIME_MS);
+                        }
+
                         if(null == queue.peek()) {
                             blockingSend(address);
                         }
@@ -878,6 +891,10 @@ public final class NonBlockingStatsDClient implements StatsDClient {
                     handler.handle(e);
                 }
             }
+        }
+
+        private long timeSinceLastSendMs() {
+            return (System.nanoTime() - lastSendTimeNanos) / 1000000;
         }
 
         private void blockingSend(final InetSocketAddress address) throws IOException {
@@ -899,6 +916,8 @@ public final class NonBlockingStatsDClient implements StatsDClient {
                                 sentBytes,
                                 sizeOfBuffer)));
             }
+
+            lastSendTimeNanos = System.nanoTime();
         }
     }
 
